@@ -7,7 +7,6 @@
 package com.owncloud.android.lib.resources.files;
 
 import com.owncloud.android.lib.common.OwnCloudClient;
-import com.owncloud.android.lib.common.network.WebdavEntry;
 import com.owncloud.android.lib.common.network.WebdavUtils;
 import com.owncloud.android.lib.common.operations.RemoteOperation;
 import com.owncloud.android.lib.common.operations.RemoteOperationResult;
@@ -16,10 +15,10 @@ import com.owncloud.android.lib.resources.files.model.RemoteFile;
 
 import org.apache.commons.httpclient.HttpStatus;
 import org.apache.jackrabbit.webdav.DavConstants;
-import org.apache.jackrabbit.webdav.MultiStatus;
 import org.apache.jackrabbit.webdav.client.methods.PropFindMethod;
 
 import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Remote operation performing the read of remote file or folder in the ownCloud server.
@@ -34,6 +33,8 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
 
     private String mRemotePath;
     private ArrayList<Object> mFolderAndFiles;
+    private final RemoteFileSink remoteFileSink;
+    private final int batchSize;
 
     /**
      * Constructor
@@ -42,6 +43,18 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
      */
     public ReadFolderRemoteOperation(String remotePath) {
         mRemotePath = remotePath;
+        remoteFileSink = null;
+        batchSize = StreamingMultiStatusParser.DEFAULT_BATCH_SIZE;
+    }
+
+    public ReadFolderRemoteOperation(String remotePath, RemoteFileSink remoteFileSink) {
+        this(remotePath, remoteFileSink, StreamingMultiStatusParser.DEFAULT_BATCH_SIZE);
+    }
+
+    public ReadFolderRemoteOperation(String remotePath, RemoteFileSink remoteFileSink, int batchSize) {
+        mRemotePath = remotePath;
+        this.remoteFileSink = remoteFileSink;
+        this.batchSize = batchSize;
     }
 
     /**
@@ -66,13 +79,12 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
             
             if (isSuccess) {
                 // get data from remote folder
-                MultiStatus dataInServer = query.getResponseBodyAsMultiStatus();
-                readData(dataInServer, client);
+                readData(query, client);
 
                 // Result of the operation
                 result = new RemoteOperationResult(true, query);
                 // Add data to the result
-                if (result.isSuccess()) {
+                if (result.isSuccess() && mFolderAndFiles != null) {
                     result.setData(mFolderAndFiles);
                 }
             } else {
@@ -110,30 +122,32 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
         return (status == HttpStatus.SC_MULTI_STATUS);
     }
 
-    /**
-     * Read the data retrieved from the server about the contents of the target folder
-     *
-     * @param remoteData Full response got from the server with the data of the target
-     *                   folder and its direct children.
-     * @param client     Client instance to the remote server where the data were
-     *                   retrieved.
-     * @return
-     */
-    private void readData(MultiStatus remoteData, OwnCloudClient client) {
-        mFolderAndFiles = new ArrayList<>();
+    private void readData(PropFindMethod query, OwnCloudClient client) throws Exception {
+        if (remoteFileSink != null) {
+            StreamingMultiStatusParser parser = new StreamingMultiStatusParser(
+                    batchSize,
+                    client.getFilesDavUri().getEncodedPath()
+            );
+            parser.parse(query.getResponseBodyAsStream(), remoteFileSink);
+        } else {
+            RemoteFileSink collectingSink = new RemoteFileSink() {
+                @Override
+                public void onFolder(RemoteFile folder) {
+                    mFolderAndFiles.add(folder);
+                }
 
-        // parse data from remote folder 
-        WebdavEntry we = new WebdavEntry(remoteData.getResponses()[0], client.getFilesDavUri().getEncodedPath());
-        mFolderAndFiles.add(new RemoteFile(we));
+                @Override
+                public void onChildrenBatch(List<RemoteFile> children) {
+                    mFolderAndFiles.addAll(children);
+                }
+            };
 
-        // loop to update every child
-        RemoteFile remoteFile;
-        for (int i = 1; i < remoteData.getResponses().length; ++i) {
-            /// new OCFile instance with the data from the server
-            we = new WebdavEntry(remoteData.getResponses()[i], client.getFilesDavUri().getEncodedPath());
-            remoteFile = new RemoteFile(we);
-            mFolderAndFiles.add(remoteFile);
+            mFolderAndFiles = new ArrayList<>();
+            StreamingMultiStatusParser parser = new StreamingMultiStatusParser(
+                    batchSize,
+                    client.getFilesDavUri().getEncodedPath()
+            );
+            parser.parse(query.getResponseBodyAsStream(), collectingSink);
         }
-
     }
 }

@@ -610,7 +610,7 @@ class WebdavEntry constructor(
         }
     }
 
-    fun decodedPath(): String = Uri.decode(path)
+    fun decodedPath(): String = Uri.decode(path) ?: path.orEmpty()
 
     val isDirectory: Boolean
         get() = "DIR" == contentType
