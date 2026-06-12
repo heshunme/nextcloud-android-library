@@ -16,6 +16,8 @@ import org.apache.jackrabbit.webdav.xml.DomUtil;
 import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
+import org.xml.sax.SAXNotRecognizedException;
+import org.xml.sax.SAXNotSupportedException;
 import org.xml.sax.helpers.DefaultHandler;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -50,30 +52,49 @@ public class StreamingMultiStatusParser {
     private static final String PREFIX_SEPARATOR = ":";
     private static final String ATTRIBUTE_SEPARATOR = "=\"";
     private static final String SPACE = " ";
+    private static final String ROOT_PATH = "/";
 
     private final int batchSize;
     private final String splitElement;
+    private final String requestedRemotePath;
 
     public StreamingMultiStatusParser(int batchSize, String splitElement) {
+        this(batchSize, splitElement, null);
+    }
+
+    public StreamingMultiStatusParser(int batchSize, String splitElement, String requestedRemotePath) {
         if (batchSize <= 0) {
             throw new IllegalArgumentException("Batch size must be greater than zero");
         }
         this.batchSize = batchSize;
         this.splitElement = splitElement;
+        this.requestedRemotePath = normalizeRemotePath(requestedRemotePath);
     }
 
     public void parse(InputStream inputStream, RemoteFileSink sink) throws IOException {
         try {
             SAXParserFactory parserFactory = SAXParserFactory.newInstance();
             parserFactory.setNamespaceAware(true);
-            parserFactory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-            parserFactory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-            parserFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            setFeatureIfSupported(parserFactory, "http://xml.org/sax/features/external-general-entities", false);
+            setFeatureIfSupported(parserFactory, "http://xml.org/sax/features/external-parameter-entities", false);
+            setFeatureIfSupported(parserFactory, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
             parserFactory.newSAXParser().parse(new InputSource(inputStream), new MultiStatusHandler(sink));
         } catch (ParserConfigurationException e) {
             throw new IOException("Unable to create WebDAV multistatus parser", e);
         } catch (SAXException e) {
             throw new IOException("Unable to parse WebDAV multistatus", e);
+        }
+    }
+
+    private void setFeatureIfSupported(
+        SAXParserFactory parserFactory,
+        String feature,
+        boolean enabled
+    ) throws ParserConfigurationException, SAXException {
+        try {
+            parserFactory.setFeature(feature, enabled);
+        } catch (SAXNotRecognizedException | SAXNotSupportedException e) {
+            // Android devices may ship different SAX implementations. Unsupported hardening flags must not break sync.
         }
     }
 
@@ -90,6 +111,28 @@ public class StreamingMultiStatusParser {
         } catch (SAXException e) {
             throw new IOException("Unable to parse WebDAV response", e);
         }
+    }
+
+    private String normalizeRemotePath(String remotePath) {
+        if (remotePath == null || remotePath.isEmpty()) {
+            return null;
+        }
+
+        String normalizedPath = remotePath;
+        if (!normalizedPath.startsWith(ROOT_PATH)) {
+            normalizedPath = ROOT_PATH + normalizedPath;
+        }
+
+        while (normalizedPath.length() > 1 && normalizedPath.endsWith(ROOT_PATH)) {
+            normalizedPath = normalizedPath.substring(0, normalizedPath.length() - 1);
+        }
+
+        return normalizedPath;
+    }
+
+    private boolean isRequestedFolder(RemoteFile remoteFile) {
+        return requestedRemotePath != null &&
+            requestedRemotePath.equals(normalizeRemotePath(remoteFile.getRemotePath()));
     }
 
     private void writeStartElement(
@@ -269,7 +312,7 @@ public class StreamingMultiStatusParser {
             try {
                 RemoteFile remoteFile = readRemoteFile(responseXml.toString());
                 responseXml = null;
-                if (!folderRead) {
+                if (!folderRead && (requestedRemotePath == null || isRequestedFolder(remoteFile))) {
                     sink.onFolder(remoteFile);
                     folderRead = true;
                     return;

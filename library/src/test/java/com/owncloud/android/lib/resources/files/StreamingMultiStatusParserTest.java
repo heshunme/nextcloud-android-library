@@ -52,6 +52,26 @@ public class StreamingMultiStatusParserTest {
         assertEquals(1, sink.batchSizes.get(1).intValue());
     }
 
+    @Test
+    public void findsFolderResponseWhenChildrenAreReturnedFirst() throws Exception {
+        String multistatus = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\" "
+            + "xmlns:nc=\"http://nextcloud.org/ns\">"
+            + response("first.txt", "first.txt", false, 2)
+            + response("", "root", true, 1)
+            + response("second.txt", "second.txt", false, 3)
+            + "</d:multistatus>";
+        RecordingSink sink = new RecordingSink();
+
+        new StreamingMultiStatusParser(BATCH_SIZE, DAV_PATH_PREFIX, "/")
+            .parse(new ByteArrayInputStream(multistatus.getBytes(StandardCharsets.UTF_8)), sink);
+
+        assertEquals("/", sink.folder.getRemotePath());
+        assertEquals(2, sink.childCount);
+        assertEquals("/first.txt", sink.firstChildPath);
+        assertEquals("/second.txt", sink.lastChildPath);
+    }
+
     private String createMultistatus(int childCount) {
         StringBuilder xml = new StringBuilder();
         xml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")

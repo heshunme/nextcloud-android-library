@@ -7,16 +7,23 @@
 package com.owncloud.android.lib.resources.files;
 
 import com.owncloud.android.lib.common.OwnCloudClient;
+import com.owncloud.android.lib.common.network.WebdavEntry;
 import com.owncloud.android.lib.common.network.WebdavUtils;
 import com.owncloud.android.lib.common.operations.RemoteOperation;
 import com.owncloud.android.lib.common.operations.RemoteOperationResult;
 import com.owncloud.android.lib.common.utils.Log_OC;
 import com.owncloud.android.lib.resources.files.model.RemoteFile;
 
+import org.apache.commons.httpclient.HttpConnection;
 import org.apache.commons.httpclient.HttpStatus;
+import org.apache.commons.httpclient.HttpState;
 import org.apache.jackrabbit.webdav.DavConstants;
+import org.apache.jackrabbit.webdav.MultiStatus;
+import org.apache.jackrabbit.webdav.MultiStatusResponse;
 import org.apache.jackrabbit.webdav.client.methods.PropFindMethod;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -69,9 +76,7 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
 
         try {
             // remote request
-            query = new PropFindMethod(client.getFilesDavUri(mRemotePath),
-                    WebdavUtils.getAllPropSet(),    // PropFind Properties
-                    DavConstants.DEPTH_1);
+            query = createPropFindMethod(client);
             int status = client.executeMethod(query);
 
             // check and process response
@@ -122,15 +127,21 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
         return (status == HttpStatus.SC_MULTI_STATUS);
     }
 
-    private void readData(PropFindMethod query, OwnCloudClient client) throws Exception {
+    private PropFindMethod createPropFindMethod(OwnCloudClient client) throws IOException {
         if (remoteFileSink != null) {
-            StreamingMultiStatusParser parser = new StreamingMultiStatusParser(
-                    batchSize,
-                    client.getFilesDavUri().getEncodedPath()
-            );
-            parser.parse(query.getResponseBodyAsStream(), remoteFileSink);
-        } else {
-            RemoteFileSink collectingSink = new RemoteFileSink() {
+            return new StreamingPropFindMethod(client.getFilesDavUri(mRemotePath));
+        }
+
+        return new PropFindMethod(client.getFilesDavUri(mRemotePath),
+                WebdavUtils.getAllPropSet(),    // PropFind Properties
+                DavConstants.DEPTH_1);
+    }
+
+    private void readData(PropFindMethod query, OwnCloudClient client) throws Exception {
+        RemoteFileSink sink = remoteFileSink;
+        if (sink == null) {
+            mFolderAndFiles = new ArrayList<>();
+            sink = new RemoteFileSink() {
                 @Override
                 public void onFolder(RemoteFile folder) {
                     mFolderAndFiles.add(folder);
@@ -141,13 +152,60 @@ public class ReadFolderRemoteOperation extends RemoteOperation {
                     mFolderAndFiles.addAll(children);
                 }
             };
+        }
 
-            mFolderAndFiles = new ArrayList<>();
+        InputStream responseStream = query.getResponseBodyAsStream();
+        if (responseStream != null) {
             StreamingMultiStatusParser parser = new StreamingMultiStatusParser(
                     batchSize,
-                    client.getFilesDavUri().getEncodedPath()
+                    client.getFilesDavUri().getEncodedPath(),
+                    mRemotePath
             );
-            parser.parse(query.getResponseBodyAsStream(), collectingSink);
+            try {
+                parser.parse(responseStream, sink);
+                return;
+            } catch (IOException e) {
+                Log_OC.w(TAG, "Streaming PROPFIND parser failed, falling back to MultiStatus parser: " + e);
+            }
+        }
+
+        readDataFromMultiStatus(query, client, sink);
+    }
+
+    private void readDataFromMultiStatus(PropFindMethod query, OwnCloudClient client, RemoteFileSink sink)
+            throws Exception {
+        MultiStatus dataInServer = query.getResponseBodyAsMultiStatus();
+        MultiStatusResponse[] responses = dataInServer.getResponses();
+        if (responses.length == 0) {
+            return;
+        }
+
+        String splitElement = client.getFilesDavUri().getEncodedPath();
+        sink.onFolder(new RemoteFile(new WebdavEntry(responses[0], splitElement)));
+
+        List<RemoteFile> children = new ArrayList<>(batchSize);
+        for (int i = 1; i < responses.length; i++) {
+            children.add(new RemoteFile(new WebdavEntry(responses[i], splitElement)));
+            if (children.size() == batchSize) {
+                sink.onChildrenBatch(new ArrayList<>(children));
+                children.clear();
+            }
+        }
+
+        if (!children.isEmpty()) {
+            sink.onChildrenBatch(new ArrayList<>(children));
         }
     }
+
+    private static class StreamingPropFindMethod extends PropFindMethod {
+        StreamingPropFindMethod(String uri) throws IOException {
+            super(uri, WebdavUtils.getAllPropSet(), DavConstants.DEPTH_1);
+        }
+
+        @Override
+        protected void processResponseBody(HttpState httpState, HttpConnection httpConnection) {
+            // Keep the response stream untouched so large PROPFIND bodies can be parsed incrementally.
+        }
+    }
+
 }
